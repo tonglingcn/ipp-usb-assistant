@@ -1,0 +1,168 @@
+# 自包含多架构 deb 构建 + 自动发布 Release
+#
+# 方案: 参考 Re-s/dde-virtual-pdf-printer 的 build-deb.yml
+#  - 用 debootstrap 拉起的 deepin 容器(chroot)编译, 不依赖外部调度器
+#  - 矩阵覆盖 amd64 / arm64 / loong64 三架构
+#  - push 形如 v* 的 tag 时, 构建完成后自动在本仓库创建 Release 并上传 .deb
+#  - 使用仓库自带的 GITHUB_TOKEN, 默认具备 contents: write, 无需跨仓库 PAT
+#
+# 触发:
+#   - 推送 v1.0.0 等 tag
+#   - 手动 workflow_dispatch (可选 arch 矩阵, 默认全架构)
+#
+# 注意: 版本号取 tag 去掉前缀 v; 若 debian/changelog 未对应该版本,
+#       构建前会先用 dch 追加一条条目, 避免 dpkg-buildpackage 报版本不匹配。
+
+name: build-deb
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            qemu: false
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            qemu: false
+          - arch: loong64
+            runner: ubuntu-24.04
+            qemu: true
+
+    name: Build deb (${{ matrix.arch }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+
+      - name: Install build host deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debootstrap \
+            qemu-user-static \
+            git devscripts
+
+      - name: Cache deepin rootfs
+        id: cache-rootfs
+        uses: actions/cache@v4
+        with:
+          path: /tmp/rootfs-cache-${{ matrix.arch }}.tar.gz
+          key: deepin-rootfs-${{ matrix.arch }}-beige-v1
+
+      - name: Bootstrap deepin beige rootfs
+        if: steps.cache-rootfs.outputs.cache-hit != 'true'
+        run: |
+          sudo debootstrap --variant=minbase --arch=${{ matrix.arch }} \
+            beige /tmp/rootfs-$ARCH \
+            https://community-packages.deepin.com/beige/ || true
+          # deepin 不在官方 debootstrap 表里, 用 sid 脚本改名引导
+          if [ ! -d /tmp/rootfs-$ARCH/etc ]; then
+            sudo debootstrap --variant=minbase --arch=${{ matrix.arch }} \
+              --include=ca-certificates \
+              sid /tmp/rootfs-$ARCH \
+              https://community-packages.deepin.com/beige/ || true
+          fi
+          sudo tar -C /tmp/rootfs-$ARCH -czf /tmp/rootfs-cache-${{ matrix.arch }}.tar.gz .
+
+      - name: Restore rootfs from cache
+        if: steps.cache-rootfs.outputs.cache-hit == 'true'
+        run: |
+          sudo mkdir -p /tmp/rootfs-${{ matrix.arch }}
+          sudo tar -C /tmp/rootfs-${{ matrix.arch }} -xzf /tmp/rootfs-cache-${{ matrix.arch }}.tar.gz
+
+      - name: Copy qemu static for foreign arch
+        if: matrix.qemu == true
+        run: |
+          sudo cp /usr/bin/qemu-loongarch64-static /tmp/rootfs-${{ matrix.arch }}/usr/bin/ 2>/dev/null || true
+
+      - name: Prepare chroot (deps + source)
+        run: |
+          ROOTFS=/tmp/rootfs-${{ matrix.arch }}
+          sudo mkdir -p $ROOTFS/tmp/src
+          sudo cp -r $GITHUB_WORKSPACE/. $ROOTFS/tmp/src/
+          # 把当前版本号写进 changelog, 与 tag 对齐
+          VERSION="${GITHUB_REF_NAME#v}"
+          sudo chroot $ROOTFS bash -c "
+            set -e
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              build-essential cmake debhelper-compat dh-make \
+              qt6-base-dev qt6-tools-dev \
+              libdtk6core-dev libdtk6gui-dev libdtk6widget-dev \
+              libcups2-dev libsane-dev pkg-config
+            cd /tmp/src
+            if [ \"\$(dpkg-parsechangelog -S Version)\" != \"$VERSION\" ]; then
+              dch -v $VERSION -m 'CI automated build'
+            fi
+          "
+
+      - name: Build package inside chroot
+        run: |
+          ROOTFS=/tmp/rootfs-${{ matrix.arch }}
+          sudo chroot $ROOTFS bash -c "
+            set -e
+            cd /tmp/src
+            rm -rf build && mkdir build && cd build
+            cmake .. -DCMAKE_INSTALL_PREFIX=/usr
+            make -j\$(nproc)
+            cd ..
+            dpkg-buildpackage -us -uc -b
+            mkdir -p /tmp/out
+            cp ../*.deb /tmp/out/ || true
+          "
+          mkdir -p $GITHUB_WORKSPACE/dist
+          sudo cp /tmp/rootfs-${{ matrix.arch }}/tmp/out/*.deb $GITHUB_WORKSPACE/dist/ || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: deb-*
+          merge-multiple: false
+
+      - name: Collect debs
+        id: debs
+        run: |
+          mkdir -p upload
+          find artifacts -name '*.deb' -exec cp {} upload/ \;
+          ls -la upload/
+          echo "files=$(ls upload/*.deb | tr '\n' ' ')" >> $GITHUB_OUTPUT
+
+      - name: Create or update Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" $FILES --clobber || true
+          else
+            gh release create "$TAG" $FILES \
+              --title "$TAG" \
+              --notes "ipp-usb-assistant $TAG 自动构建 (amd64 / arm64 / loong64)\n\n由 build-deb.yml 在 deepin beige 容器中编译生成。"
+          fi
+        working-directory: upload
