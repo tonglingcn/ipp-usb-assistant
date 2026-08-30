@@ -1,0 +1,35 @@
+Source: ipp-usb-assistant
+Section: utils
+Priority: optional
+Maintainer: 克亮 <315707022@qq.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+ qt6-base-dev,
+ qt6-tools-dev,
+ libdtk6core-dev,
+ libdtk6gui-dev,
+ libdtk6widget-dev,
+ libcups2-dev,
+ libsane-dev,
+ pkg-config,
+Standards-Version: 4.6.2
+Homepage: https://github.com/tonglingcn/ipp-usb-assistant
+
+Package: ipp-usb-assistant
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+Recommends:
+ ipp-usb,
+ cups,
+ sane-airscan,
+ avahi-daemon,
+Description: Driverless printing and scanning manager for UOS / Deepin 25
+ A native DTK6 application that manages driverless (IPP-USB) printing
+ and scanning: environment detection with one-click repair and offline
+ install guidance, printer queue management with PPD fine-tuning,
+ SANE/eSCL scanning with preview, and advanced per-device filtering
+ that lets a device keep driverless printing while its scanning is
+ handed back to the vendor's native SANE driver.

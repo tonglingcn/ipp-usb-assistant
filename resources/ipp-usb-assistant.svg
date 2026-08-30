@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8ef7"/>
+      <stop offset="1" stop-color="#2b5fd9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded background -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+
+  <!-- printer body -->
+  <rect x="34" y="52" width="60" height="30" rx="6" fill="#ffffff"/>
+  <!-- paper top -->
+  <rect x="44" y="36" width="40" height="20" rx="3" fill="#dce7fb"/>
+  <!-- paper out -->
+  <rect x="44" y="74" width="40" height="18" rx="3" fill="#eaf1ff"/>
+  <line x1="50" y1="81" x2="78" y2="81" stroke="#9db9ee" stroke-width="3" stroke-linecap="round"/>
+  <line x1="50" y1="87" x2="70" y2="87" stroke="#c3d5f5" stroke-width="3" stroke-linecap="round"/>
+  <!-- status led -->
+  <circle cx="86" cy="60" r="3.5" fill="#37c26e"/>
+
+  <!-- scan beam -->
+  <rect x="28" y="98" width="72" height="8" rx="4" fill="#8fd0ff" opacity="0.95"/>
+</svg>

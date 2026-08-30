@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=IPP-USB 免驱助手
+Name[en]=IPP-USB Driverless Assistant
+GenericName=IPP-USB 免驱打印与扫描工具
+GenericName[en]=IPP-USB Driverless Printing & Scanning Tool
+Comment=基于 IPP-USB 的免驱动打印与扫描管理
+Comment[en]=Driverless printing and scanning manager based on IPP-USB
+Exec=ipp-usb-assistant
+Icon=ipp-usb-assistant
+Categories=Utility;System;
+Terminal=false
+StartupNotify=true

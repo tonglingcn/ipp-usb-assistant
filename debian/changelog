@@ -1,0 +1,12 @@
+ipp-usb-assistant (1.0.0) unstable; urgency=medium
+
+  * Initial release of ipp-usb-assistant.
+  * IPP-USB environment detection with service control, offline install
+    guidance and one-click reinstall.
+  * Driverless printer discovery, queue management and PPD fine-tuning.
+  * SANE/eSCL scanning with embedded preview, scan-source labelling
+    (Flatbed/ADF) and ADF error handling.
+  * Advanced filtering: whole-device quirk release and sane-airscan
+    scan-channel exclusion (keeps driverless printing).
+
+ -- 克亮 <315707022@qq.com>  Sun, 30 Aug 2026 20:00:00 +0800
