@@ -272,9 +272,12 @@ void EnvChecker::check()
         return s && s->status == QStringLiteral("active");
     };
 
-    const bool ippUsbOk = isActive(QStringLiteral("ipp-usb.service"));
-    const bool avahiOk = isActive(QStringLiteral("avahi-daemon.service"));
-    const bool cupsOk = isActive(QStringLiteral("cups.service"));
+    // 注意：m_services 中 unit 字段为不带 .service 的短名（"ipp-usb"、
+    // "avahi-daemon"、"cups"），isActive() 按 unit 短名查找，故这里不能
+    // 带 .service 后缀，否则永远找不到对应服务，overall 会错误判为 Warn。
+    const bool ippUsbOk = isActive(QStringLiteral("ipp-usb"));
+    const bool avahiOk = isActive(QStringLiteral("avahi-daemon"));
+    const bool cupsOk = isActive(QStringLiteral("cups"));
     const bool ippUsbBin = commandExists("ipp-usb");
 
     // 2) 文本报告（诊断/导出用）
