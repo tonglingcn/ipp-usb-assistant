@@ -1,0 +1,181 @@
+# IPP-USB 免驱助手 · 多架构自动构建
+#
+# 触发:
+#   - push 到 master / dev 分支        → 仅构建 amd64 验证 (dev 分支只建 amd64)
+#   - 推送形如 v1.2.3 的 tag            → 全架构构建 + 自动发布到 GitHub Release
+#   - 手动 (workflow_dispatch)         → 全架构构建 (可选发版)
+#
+# 策略: 用 debootstrap 装一份真实的 deepin beige rootfs, 在 chroot 内
+#       用 dpkg-buildpackage 打包, 保证产物 ABI 与 deepin 系统一致。
+#       跨架构 (arm64/loong64) 通过 qemu-user-static 用户态模拟实现。
+
+name: build-deb
+
+on:
+  push:
+    branches: [master, dev]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: '构建后是否发布到 Release (仅 tag/手动有效)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # 仅 release job 需要 (gh release create)
+
+concurrency:
+  group: build-deb-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 矩阵并行: 为每种架构 debootstrap 一份 beige rootfs, chroot 内编译打包
+  # ---------------------------------------------------------------------------
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false          # 一个架构失败不影响其他架构
+      matrix:
+        include:
+          - { arch: amd64,   distro: beige, qemu: false }
+          - { arch: arm64,   distro: beige, qemu: true  }
+          - { arch: loong64, distro: beige, qemu: true  }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # 需要完整历史以读取版本号 (changelog)
+
+      # dev 分支只构建 amd64, 节省 CI 时间
+      - name: Skip non-amd64 on dev branch
+        if: ${{ github.ref == 'refs/heads/dev' && matrix.arch != 'amd64' }}
+        run: echo "dev 分支跳过非 amd64 架构" && exit 0
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            debootstrap qemu-user-static git-buildpackage \
+            ubuntu-keyring ca-certificates
+
+      # 派生的 deepin beige 软件源 (含 DTK6 / Qt6 打包)
+      - name: Bootstrap ${{ matrix.arch }} rootfs
+        run: |
+          set -e
+          ARCH=${{ matrix.arch }}
+          ROOTFS=/tmp/rootfs-$ARCH
+          MIRROR=https://community-packages.deepin.com/beige/
+          sudo rm -rf "$ROOTFS"
+          sudo debootstrap --arch=$ARCH --include=ca-certificates \
+            beige "$ROOTFS" "$MIRROR"
+          # 写入 deepin 源并禁止 apt 交互
+          sudo tee "$ROOTFS/etc/apt/apt.conf.d/99norecommend" >/dev/null <<'EOF'
+          APT::Install-Recommends "false";
+          APT::Get::Assume-Yes "true";
+          Acquire::Check-Valid-Until "false";
+          EOF
+          sudo tee "$ROOTFS/etc/apt/sources.list" >/dev/null <<EOF
+          deb $MIRROR beige main contrib non-free
+          EOF
+
+      - name: Mount chroot + copy qemu (cross arch)
+        run: |
+          set -e
+          ARCH=${{ matrix.arch }}
+          ROOTFS=/tmp/rootfs-$ARCH
+          sudo mount -t proc  /proc  "$ROOTFS/proc"
+          sudo mount -t sysfs  /sys   "$ROOTFS/sys"
+          sudo mount --bind /dev       "$ROOTFS/dev"
+          sudo mount --bind "$PWD"     "$ROOTFS/src"
+          if [ "${{ matrix.qemu }}" = "true" ]; then
+            QBIN=$(ls /usr/bin/qemu-${ARCH}-static 2>/dev/null || true)
+            if [ -z "$QBIN" ]; then
+              # loong64 的 qemu 二进制名可能带后缀, 兜底查找
+              QBIN=$(ls /usr/bin/qemu-*loongarch64*-static 2>/dev/null | head -1 || true)
+            fi
+            echo "使用 QEMU: $QBIN"
+            sudo cp "$QBIN" "$ROOTFS/usr/bin/"
+          fi
+
+      # 在 chroot 内安装构建依赖并打包
+      - name: Build & package inside chroot
+        id: pkg
+        run: |
+          set -e
+          ARCH=${{ matrix.arch }}
+          ROOTFS=/tmp/rootfs-$ARCH
+          sudo chroot "$ROOTFS" /bin/bash -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            cd /src
+            # 根据 debian/control 的 Build-Depends 安装全部构建依赖
+            mk-build-deps --install --remove --tool="apt-get -o Debug::pkgProblemResolver=no -y" debian/control || \
+              apt-get build-dep -y .
+            # 标准 debhelper 打包 (native 格式, 读取 debian/changelog 版本)
+            dpkg-buildpackage -us -uc -b
+          '
+          # 收集产物 (.deb 与构建日志)
+          DEB=$(ls -t /tmp/rootfs-$ARCH/*.deb 2>/dev/null | head -1)
+          cp "$DEB" "./$(basename "$DEB")"
+          echo "deb=$(basename "$DEB")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: |
+            *.deb
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 2) 发版: 仅 tag (或手动且勾选 publish) 时, 汇集三架构 deb 上传到 Release
+  # ---------------------------------------------------------------------------
+  release:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download all debs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=CI-$(date +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          VER=${{ steps.ver.outputs.version }}
+          TAG="${GITHUB_REF_NAME}"
+          # 已有同 tag 的 Release 则追加资产, 否则新建
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            for f in *.deb; do
+              gh release upload "$TAG" "$f" --clobber || \
+                (gh release delete-asset "$TAG" "$(basename "$f")" -y 2>/dev/null; gh release upload "$TAG" "$f")
+            done
+          else
+            gh release create "$TAG" *.deb \
+              --title "ipp-usb-assistant $VER" \
+              --notes "自动构建的多架构 deb 包 (amd64 / arm64 / loong64)。
+
+          安装: sudo dpkg -i ipp-usb-assistant_*.deb
+          依赖: sudo apt-get install -f"
+          fi
