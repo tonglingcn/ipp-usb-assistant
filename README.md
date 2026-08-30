@@ -138,6 +138,39 @@ cd examples/ipp-usb-assistant
 dpkg-buildpackage -us -uc -b   # 生成 ../ipp-usb-assistant_1.0.0_amd64.deb
 ```
 
+## 自动构建（CI）
+
+本仓库通过 `build.yml` 自主触发通用的 deepin 打包调度器
+[buildpackage-deepin](https://github.com/tonglingcn/buildpackage-deepin)，
+自动编译 **amd64 / arm64 / riscv64 / loong64** 四个架构的 deb，并做 `lintian` 检查。
+
+### 触发方式
+
+| 方式 | 操作 | 结果 |
+|---|---|---|
+| **打 tag** | 推送形如 `v1.0.1` 的 tag | 自动用 `crimson`（Deepin 25）构建四架构 deb |
+| **手动** | Actions → build-deepin → Run workflow，可选 `codename` | 立即按所选代号（apricot/beige/crimson）构建 |
+
+```bash
+# 打 tag 触发示例
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+### 前提配置
+
+本仓库 `Settings → Secrets and variables → Actions → New repository secret` 需添加：
+
+- **Name**：`DISPATCH_TOKEN`
+- **Value**：一个带 `repo` + `workflow` 权限的 Personal Access Token
+  （默认 `GITHUB_TOKEN` 不能跨仓库触发 workflow，因此必须单独配置）
+
+### 获取产物
+
+构建在 `buildpackage-deepin` 仓库的 Actions 页面完成，产物以
+**artifact** 形式提供（含各架构 `.deb`、源码包与 `lintian` 报告），
+在对应运行记录内下载即可。
+
 ## 目录结构
 ```
 src/
