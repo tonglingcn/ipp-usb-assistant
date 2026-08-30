@@ -1,0 +1,57 @@
+# 临时用途: 把指定历史 run 已构建好的 deb artifact 上传到指定 Release
+# 用于修复 release job 路径 bug 后, 无需重新编译即可补传产物
+# 手动触发: Actions -> Upload existing deb to Release -> Run workflow
+
+name: Upload existing deb to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Source workflow run id (containing deb-* artifacts)'
+        required: true
+      tag:
+        description: 'Target release tag'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts from source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.inputs.run_id }}
+        run: |
+          set -eux
+          mkdir -p artifacts
+          gh run download "$RUN_ID" \
+            --repo "${{ github.repository }}" \
+            --pattern 'deb-*' \
+            --dir artifacts
+
+      - name: Collect debs
+        id: debs
+        run: |
+          set -eux
+          mkdir -p upload
+          find artifacts -name '*.deb' -exec cp {} upload/ \;
+          ls -la upload/
+          test -n "$(ls upload/*.deb 2>/dev/null)" || { echo "::error::no .deb found"; exit 1; }
+          echo "files=$(ls upload/*.deb | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
+          FILES: ${{ steps.debs.outputs.files }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eux
+          gh release upload "$TAG" $FILES --repo "$REPO" --clobber
+          gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name'
