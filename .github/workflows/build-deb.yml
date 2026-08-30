@@ -105,6 +105,8 @@ jobs:
           mkdir -p upload
           find artifacts -name '*.deb' -exec cp {} upload/ \;
           ls -la upload/
+          test -n "$(ls upload/*.deb 2>/dev/null)" || { echo "::error::no .deb found in artifacts"; exit 1; }
+          # 输出 workspace 相对路径, 后续步骤在 workspace 根目录执行, 不再切目录
           echo "files=$(ls upload/*.deb | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
       - name: Create or update Release
@@ -112,13 +114,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           FILES: ${{ steps.debs.outputs.files }}
+          REPO: ${{ github.repository }}
         run: |
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$TAG" $FILES --repo "${{ github.repository }}" --clobber || true
+          set -eux
+          ls -la upload/
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" $FILES --repo "$REPO" --clobber
           else
             gh release create "$TAG" $FILES \
-              --repo "${{ github.repository }}" \
+              --repo "$REPO" \
               --title "$TAG" \
-              --notes "ipp-usb-assistant $TAG 自动构建产物 (amd64 / arm64 / loong64)\n\n由 build-deb.yml 在 deepin crimson 官方容器内编译生成。"
+              --notes "ipp-usb-assistant $TAG 自动构建产物 (amd64 / arm64 / loong64)
+
+          由 build-deb.yml 在 deepin crimson 官方容器内编译生成。"
           fi
-        working-directory: upload
+          gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name'
