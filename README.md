@@ -167,9 +167,21 @@ git push origin v1.0.1
 
 ### 获取产物
 
-构建在 `buildpackage-deepin` 仓库的 Actions 页面完成，产物以
-**artifact** 形式提供（含各架构 `.deb`、源码包与 `lintian` 报告），
-在对应运行记录内下载即可。
+构建完成后，`buildpackage-deepin` 会自动在**本仓库的 [Releases](../../releases)** 页面创建对应 tag 的 Release，并将所有四架构 `.deb` 作为 **assets** 上传，无需再进 Actions 下载 artifact。
+
+Release 标题即为 tag（如 `v1.0.0`），正文注明构建使用的 deepin 代号。每个架构通常包含：
+- `ipp-usb-assistant_<version>_<arch>.deb`
+- `ipp-usb-assistant-dbgsym_<version>_<arch>.deb`（如生成）
+
+### 配置说明
+
+1. **本仓库**（`ipp-usb-assistant`）`Settings → Secrets and variables → Actions → New repository secret`：
+   - **Name**：`DISPATCH_TOKEN`
+   - **Value**：带 `repo` + `workflow` 权限的 Personal Access Token
+   （默认 `GITHUB_TOKEN` 不能跨仓库触发 workflow）
+
+2. **打包调度器仓库**（`buildpackage-deepin`）同样需要配置同名 `DISPATCH_TOKEN`，
+   因为上传 Release assets 到本仓库需要写入权限。同一个 PAT 存到两个仓库即可。
 
 ## 目录结构
 ```
