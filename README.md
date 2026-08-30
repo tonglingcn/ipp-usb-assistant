@@ -3,6 +3,37 @@
 面向 Deepin 25 的**免驱打印与扫描**原生管理工具，基于 DTK6 + Qt6 开发。
 核心价值：把"IPP-USB 免驱"从命令行排查变成可视化的专业操作界面。
 
+[![Release](https://img.shields.io/github/v/release/tonglingcn/ipp-usb-assistant?label=release)](https://github.com/tonglingcn/ipp-usb-assistant/releases)
+[![Build](https://github.com/tonglingcn/ipp-usb-assistant/actions/workflows/build-deb.yml/badge.svg)](https://github.com/tonglingcn/ipp-usb-assistant/actions/workflows/build-deb.yml)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-deepin%2025-brightgreen)](https://www.deepin.org/)
+[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20loong64-lightgrey)](https://github.com/tonglingcn/ipp-usb-assistant/releases)
+
+> **快速开始**：不想编译的话，直接到
+> [Releases](https://github.com/tonglingcn/ipp-usb-assistant/releases)
+> 下载对应架构的 `.deb` 安装，详见[下载安装](#下载安装推荐)。
+
+## 下载安装（推荐）
+
+[Releases](https://github.com/tonglingcn/ipp-usb-assistant/releases) 页面提供
+**amd64 / arm64 / loong64** 三架构预编译 deb，直接下载安装即可，无需编译。
+
+```bash
+# 以 amd64 为例，其他架构替换包名中的架构字段
+sudo apt install ./ipp-usb-assistant_1.0.0_amd64.deb
+```
+
+每个 Release 包含 6 个文件：
+
+| 文件 | 说明 |
+|---|---|
+| `ipp-usb-assistant_1.0.0_amd64.deb` | amd64 主包（约 239 KB） |
+| `ipp-usb-assistant_1.0.0_arm64.deb` | arm64 主包（约 216 KB） |
+| `ipp-usb-assistant_1.0.0_loong64.deb` | loong64 主包（约 224 KB） |
+| `ipp-usb-assistant-dbgsym_1.0.0_<arch>.deb` | 对应架构的调试符号包，普通用户无需下载 |
+
+安装后可从启动器或应用菜单搜索「IPP-USB」打开，桌面项名为 `ipp-usb-assistant`。
+
 ## 功能概览
 
 ### 1. 环境检测（IPP-USB 能力）
@@ -86,23 +117,24 @@ USB eSCL 扫描依赖 `ipp-usb` 与 `avahi-daemon` 的 mDNS 回环发现（通�
 
 ## 编译与运行
 
+仅在需要修改源码时使用；普通用户建议直接安装 [Releases](#下载安装推荐) 的 deb。
+
 ```bash
-# 依赖（Deepin 25）
-sudo apt install build-essential cmake \
-     qt6-base-dev qt6-tools-dev dtk6core-dev dtk6gui-dev dtk6widget-dev \
+# 构建依赖（Deepin 25）
+sudo apt install build-essential cmake debhelper \
+     qt6-base-dev qt6-tools-dev \
+     libdtk6core-dev libdtk6gui-dev libdtk6widget-dev \
      libcups2-dev libsane-dev pkg-config
 
-# 编译
+# 编译（一键脚本，内部处理 AUTOMOC 先后顺序，避免并行构建竞态）
 cd examples/ipp-usb-assistant
-rm -rf build && mkdir build && cd build
-cmake .. -DCMAKE_PREFIX_PATH=/usr/lib/x86_64-linux-gnu/cmake
-make -j4
+bash build.sh
 
 # 运行（部分操作会通过 pkexec 申请管理员权限，用于添加打印机与改写 PPD）
-./ipp-usb-assistant
+./build/ipp-usb-assistant
 ```
 
-一键脚本：`bash build.sh`
+需要生成安装包见 [deb 打包（本地）](#deb-打包本地)。
 
 ## 权限模型
 
@@ -125,63 +157,73 @@ make -j4
 - 启动时若检测到当前用户不在 `lpadmin` 组，环境检测页顶部会显示提示条并给出加组命令
   （`sudo usermod -aG lpadmin $USER`，需注销重登录生效）。
 
-## 国际化与打包
+## 国际化
 
-- **国际化**：全部界面文案已接入 `tr()`，英文翻译见 `translations/ipp-usb-assistant_en.ts`
+- 全部界面文案已接入 `tr()`，英文翻译见 `translations/ipp-usb-assistant_en.ts`
   （`make ipp-usb-assistant_lupdate` 更新、`lrelease` 生成 .qm）
 - **应用图标**：SVG 源文件在 `resources/ipp-usb-assistant.svg`，
   多尺寸 PNG 在 `resources/icons/hicolor/`，安装后由桌面项 `Icon=ipp-usb-assistant` 引用
-- **deb 打包**：
+
+## deb 打包（本地）
+
+在 Deepin 25 上本地生成 deb（CI 使用的也是同一套 `debian/` 规则）：
 
 ```bash
+sudo apt install build-essential cmake debhelper \
+     qt6-base-dev qt6-tools-dev \
+     libdtk6core-dev libdtk6gui-dev libdtk6widget-dev \
+     libcups2-dev libsane-dev pkg-config
+
 cd examples/ipp-usb-assistant
 dpkg-buildpackage -us -uc -b   # 生成 ../ipp-usb-assistant_1.0.0_amd64.deb
 ```
 
+如需三架构全量构建，直接用 CI 即可，见[自动构建（CI）](#自动构建ci)。
+
 ## 自动构建（CI）
 
-本仓库通过 `build.yml` 自主触发通用的 deepin 打包调度器
-[buildpackage-deepin](https://github.com/tonglingcn/buildpackage-deepin)，
-自动编译 **amd64 / arm64 / riscv64 / loong64** 四个架构的 deb，并做 `lintian` 检查。
+本仓库通过自带的 `.github/workflows/build-deb.yml` 完成多架构构建与发布，
+**不依赖任何外部调度器或额外 PAT**，使用仓库自带的 `GITHUB_TOKEN` 即可发布 Release。
 
-### 触发方式
+### 构建矩阵
 
-| 方式 | 操作 | 结果 |
+| 架构 | Runner | 构建镜像 |
 |---|---|---|
-| **打 tag** | 推送形如 `v1.0.1` 的 tag | 自动用 `crimson`（Deepin 25）构建四架构 deb |
-| **手动** | Actions → build-deepin → Run workflow，可选 `codename` | 立即按所选代号（apricot/beige/crimson）构建 |
+| amd64 | `ubuntu-24.04` | `linuxdeepin/deepin:crimson` |
+| arm64 | `ubuntu-24.04-arm` | `linuxdeepin/deepin:crimson-arm64` |
+| loong64 | `ubuntu-24.04` + QEMU | `linuxdeepin/deepin:crimson-loong64` |
+
+构建在 deepin 官方容器内完成，直接 `apt install` 构建依赖后
+`cmake` → `make` → `dpkg-buildpackage`，保证与 Deepin 25 系统库一致。
+
+### 发版流程
+
+推送形如 `v*` 的 tag 即自动构建并发布：
 
 ```bash
-# 打 tag 触发示例
 git tag v1.0.1
 git push origin v1.0.1
 ```
 
-### 前提配置
+流程：三架构并行构建 → 上传 artifact → 聚合生成 Release 并上传全部 `.deb`。
+产物直接出现在本仓库 [Releases](https://github.com/tonglingcn/ipp-usb-assistant/releases) 页面。
 
-本仓库 `Settings → Secrets and variables → Actions → New repository secret` 需添加：
+也可在 Actions → **build-deb** → **Run workflow** 手动触发（不传 tag 时只构建，不发 Release）。
 
-- **Name**：`DISPATCH_TOKEN`
-- **Value**：一个带 `repo` + `workflow` 权限的 Personal Access Token
-  （默认 `GITHUB_TOKEN` 不能跨仓库触发 workflow，因此必须单独配置）
+### 构建耗时参考
 
-### 获取产物
+| 架构 | 耗时 | 说明 |
+|---|---|---|
+| amd64 | 约 4 分钟 | 原生容器 |
+| arm64 | 约 3 分钟 | ARM 原生 runner |
+| loong64 | 约 28 分钟 | QEMU 模拟编译 Qt6，较慢但可用 |
 
-构建完成后，`buildpackage-deepin` 会自动在**本仓库的 [Releases](../../releases)** 页面创建对应 tag 的 Release，并将所有四架构 `.deb` 作为 **assets** 上传，无需再进 Actions 下载 artifact。
+### 产物补传
 
-Release 标题即为 tag（如 `v1.0.0`），正文注明构建使用的 deepin 代号。每个架构通常包含：
-- `ipp-usb-assistant_<version>_<arch>.deb`
-- `ipp-usb-assistant-dbgsym_<version>_<arch>.deb`（如生成）
-
-### 配置说明
-
-1. **本仓库**（`ipp-usb-assistant`）`Settings → Secrets and variables → Actions → New repository secret`：
-   - **Name**：`DISPATCH_TOKEN`
-   - **Value**：带 `repo` + `workflow` 权限的 Personal Access Token
-   （默认 `GITHUB_TOKEN` 不能跨仓库触发 workflow）
-
-2. **打包调度器仓库**（`buildpackage-deepin`）同样需要配置同名 `DISPATCH_TOKEN`，
-   因为上传 Release assets 到本仓库需要写入权限。同一个 PAT 存到两个仓库即可。
+若某次 Release 未带上 deb（如历史构建），可用
+`.github/workflows/upload-existing-release.yml` 手动补传：
+Actions → **Upload existing deb to Release** → 填 `run_id` 与 `tag` 即可，
+无需重新编译。
 
 ## 目录结构
 ```
@@ -201,3 +243,22 @@ src/
 
 ## 原理
 详见 `docs/principles.md`（ipp-usb / sane-airscan 源码剖析）。
+
+## 参与开发
+
+提交前建议本地跑通：
+
+```bash
+bash build.sh                  # 编译
+dpkg-buildpackage -us -uc -b   # 验证打包
+```
+
+如要新增功能，请沿用现有约定：
+
+- 需要提权的操作统一走 `src/privileges.{h,cpp}`，不要自行拼接 `pkexec`
+- 界面文案一律使用 `tr()`，并同步更新 `translations/`
+- 改动涉及 IPP-USB / sane-airscan 行为时，同步更新 `docs/principles.md`
+
+## 许可
+
+本项目基于 **GPL-3.0** 发布，详见 [LICENSE](./LICENSE)。
