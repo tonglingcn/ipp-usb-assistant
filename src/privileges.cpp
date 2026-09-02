@@ -2,6 +2,7 @@
 
 #include <QProcess>
 #include <QRegularExpression>
+#include <QVector>
 
 #include <grp.h>
 #include <pwd.h>

@@ -10,6 +10,7 @@
 #include <QNetworkInterface>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrent>
+#include "qtcompat.h"
 
 EnvChecker::EnvChecker(QObject *parent)
     : QObject(parent)
@@ -139,7 +140,7 @@ static int countIppOverUsbInterfaces(const QString &block)
         R"(bEndpointAddress\s+0x[0-9a-fA-F]+\s+EP\s+\d+\s+(IN|OUT))");
 
     int count = 0;
-    const QStringList ifBlocks = block.split(ifSplit, Qt::SkipEmptyParts);
+    const QStringList ifBlocks = block.split(ifSplit, kSkipEmptyParts);
     for (const QString &ifBlock : ifBlocks) {
         if (!clsRe.match(ifBlock).hasMatch())
             continue;
@@ -181,7 +182,7 @@ QStringList EnvChecker::lsusbImagingDevices()
     const QString out = QString::fromLocal8Bit(proc.readAllStandardOutput());
     // 按设备块分割：每个设备以 "Bus xxx Device xxx" 开始
     static const QRegularExpression devSplit(R"((?=Bus\s+\d+\s+Device\s+\d+))");
-    const QStringList blocks = out.split(devSplit, Qt::SkipEmptyParts);
+    const QStringList blocks = out.split(devSplit, kSkipEmptyParts);
 
     for (const QString &block : blocks) {
         const bool hasPrinter = printerRe.match(block).hasMatch();
@@ -235,6 +236,15 @@ QStringList EnvChecker::lsusbImagingDevices()
     return list;
 }
 
+const ServiceInfo *EnvChecker::findService(const QString &unit) const
+{
+    for (const ServiceInfo &s : m_services) {
+        if (s.unit == unit)
+            return &s;
+    }
+    return nullptr;
+}
+
 void EnvChecker::check()
 {
     m_report.clear();
@@ -260,15 +270,8 @@ void EnvChecker::check()
 
     // 按 unit 名查找，不依赖 m_services 的数组顺序。
     // 此前用 m_services[0]/[1]/[2] 硬编码下标，一旦调整 metas 顺序就会静默取错。
-    auto serviceOf = [this](const QString &unit) -> const ServiceInfo * {
-        for (const ServiceInfo &s : m_services) {
-            if (s.unit == unit)
-                return &s;
-        }
-        return nullptr;
-    };
-    auto isActive = [&serviceOf](const QString &unit) -> bool {
-        const ServiceInfo *s = serviceOf(unit);
+    auto isActive = [this](const QString &unit) -> bool {
+        const ServiceInfo *s = findService(unit);
         return s && s->status == QStringLiteral("active");
     };
 
@@ -284,19 +287,22 @@ void EnvChecker::check()
     // 文案按 unit 名关联，不用数组下标。此前 okTails[i] 依赖 m_services 顺序，
     // 且当服务数量 > 3 时会越界。
     m_report.append(tr("== 免驱能力依赖服务 =="));
+    // 与 ServiceInfo::unit 保持一致，这里必须按短名（"ipp-usb" / "avahi-daemon" /
+    // "cups"）比较。此前写成 "ipp-usb.service"，而 unit 只存短名，导致三个分支
+    // 永不成立、全部落到默认文案：avahi 和 cups 也会被显示成"打印队列管理就绪"。
     auto tailFor = [](const QString &unit, bool active, bool installed) -> QString {
         if (active) {
-            if (unit == QLatin1String("ipp-usb.service"))
+            if (unit == QLatin1String("ipp-usb"))
                 return tr("  ✓ 支持 USB 免驱打印");
-            if (unit == QLatin1String("avahi-daemon.service"))
+            if (unit == QLatin1String("avahi-daemon"))
                 return tr("  ✓ mDNS 发现就绪");
             return tr("  ✓ 打印队列管理就绪");
         }
         if (!installed)
             return tr("  ✗ 未安装（需 apt install）");
-        if (unit == QLatin1String("ipp-usb.service"))
+        if (unit == QLatin1String("ipp-usb"))
             return tr("  ✗ 未运行");
-        if (unit == QLatin1String("avahi-daemon.service"))
+        if (unit == QLatin1String("avahi-daemon"))
             return tr("  ✗ 扫描/发现不可用");
         return tr("  ✗ 打印不可用");
     };
@@ -610,10 +616,10 @@ QString EnvChecker::ippUsbPreset()
         return QString();
     const QString out = QString::fromLocal8Bit(proc.readAllStandardOutput());
     // 输出形如："ipp-usb.service                          static          -"
-    const QStringList lines = out.split('\n', Qt::SkipEmptyParts);
+    const QStringList lines = out.split('\n', kSkipEmptyParts);
     for (const QString &line : lines) {
         if (!line.startsWith("ipp-usb.service")) continue;
-        const QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        const QStringList parts = line.split(QRegularExpression("\\s+"), kSkipEmptyParts);
         if (parts.size() >= 2) return parts[1];
     }
     return QString();

@@ -29,6 +29,7 @@
 #include <DFontSizeManager>
 
 #include <cups/cups.h>
+#include "qtcompat.h"
 
 DWIDGET_USE_NAMESPACE
 
@@ -229,7 +230,7 @@ void AddPrinterDialog::fetchLpinfoAsync()
         if (st != QProcess::NormalExit || exitCode != 0)
             return;
         const QString out = QString::fromLocal8Bit(proc->readAllStandardOutput());
-        for (const QString &line : out.split('\n', Qt::SkipEmptyParts)) {
+        for (const QString &line : out.split('\n', kSkipEmptyParts)) {
             const QString trimmed = line.trimmed();
             if (trimmed.isEmpty()) continue;
             // 第一个空格分两段：id + 描述
@@ -272,7 +273,7 @@ void AddPrinterDialog::fillDriverCombo()
     // 取 make 主段（去 Series / 一串数字）
     QString makeShort;
     if (!deviceMake.isEmpty()) {
-        QStringList tokens = deviceMake.split(' ', Qt::SkipEmptyParts);
+        QStringList tokens = deviceMake.split(' ', kSkipEmptyParts);
         // 第一段往往是厂商，第二段是型号前缀
         if (tokens.size() >= 2) makeShort = tokens[0] + " " + tokens[1];
         else makeShort = tokens.value(0);
@@ -346,6 +347,9 @@ void AddPrinterDialog::onAutoRescan()
         if (e.everywhere)
             sub += tr("  ·  免驱（IPP Everywhere）");
         item->setData(sub, Qt::UserRole + 1);
+        // UserRole+2 单独保存 makeAndModel 原始值，便于添加队列时取出来作为
+        // lpadmin -D 的 printer-info，以及生成更具品牌感的队列名。
+        item->setData(e.makeAndModel, Qt::UserRole + 2);
         m_autoModel->appendRow(item);
     }
     if (m_autoModel->rowCount() == 0) {
@@ -378,10 +382,14 @@ void AddPrinterDialog::onAddClicked()
         DMessageBox::warning(this, tr("添加打印机"), tr("请先在列表中选择一台打印机。"));
         return;
     }
+    // 取候选的 makeAndModel（驱动反查拿到的真实型号，如 "Pantum BM4240ADW Series"），
+    // 用于 lpadmin -D（让"描述"显示真实型号）以及生成更具品牌感的队列名。
+    const auto chosen = idx.isValid() ? idx.data(Qt::UserRole + 2).toString()
+                                       : m_candidates.first().makeAndModel;
 
-    // 队列名由系统自动生成；重名时追加序号（-2/-3…），
-    // 支持同一设备用不同免驱驱动反复添加做对比测试
-    QString name = PrintManager::makeDefaultName(uri);
+    // 队列名由系统自动生成；优先用真实品牌型号生成（如 "Pantum-BM4240ADW-Series"），
+    // 重名时追加 -2/-3，支持同一设备用不同免驱驱动反复添加做对比测试
+    QString name = PrintManager::makeDefaultName(uri, chosen);
 
     cups_dest_t *dests = nullptr;
     int n = cupsGetDests(&dests);
@@ -402,6 +410,7 @@ void AddPrinterDialog::onAddClicked()
     m_addedName = name;
     setProperty("uri", uri);
     setProperty("driver", selectedDriver());
+    setProperty("prettyName", chosen);
     accept();
 }
 

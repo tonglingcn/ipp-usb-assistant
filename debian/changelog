@@ -1,3 +1,21 @@
+ipp-usb-assistant (1.0.1) unstable; urgency=medium
+
+  * Unified deepin 25 (Qt 6 / DTK 6) and UOS 20 (Qt 5 / DTK 5) into a
+    single source tree.
+    - Added src/qtcompat.h to absorb Qt 5 / Qt 6 API migration.
+    - CMakeLists.txt auto-detects Qt6 then falls back to Qt5, with DTK
+      major version following the Qt major version.
+    - CUPS detection falls back to find_path/find_library when cups.pc is
+      missing (UOS 20's libcups2-dev ships no pkg-config file).
+    - SANE detection falls back from sane-backends to sane.
+  * Added debian-uos/ metadata and build-uos.sh for UOS 20 packaging.
+  * Removed the unused diagnostics module (never referenced by the UI).
+  * Robustness: look up services by unit name instead of relying on the
+    order of the services() list.
+  * Completed the English translation (171/171 messages).
+
+ -- 克亮 <315707022@qq.com>  Mon, 1 Sep 2026 23:10:00 +0800
+
 ipp-usb-assistant (1.0.0) unstable; urgency=medium
 
   * Initial release of ipp-usb-assistant.

@@ -15,6 +15,7 @@
 #include <DLabel>
 #include <QCoreApplication>
 #include <DMessageBox>
+#include "qtcompat.h"
 
 DWIDGET_USE_NAMESPACE
 
@@ -170,7 +171,7 @@ void PrintPropertiesDialog::loadOptions()
     proc.start("lpoptions", {"-p", m_queue, "-l"});
     proc.waitForFinished(8000);
     const QString out = QString::fromLocal8Bit(proc.readAllStandardOutput());
-    const QStringList lines = out.split('\n', Qt::SkipEmptyParts);
+    const QStringList lines = out.split('\n', kSkipEmptyParts);
 
     for (QString line : lines) {
         line = line.trimmed();
@@ -186,7 +187,7 @@ void PrintPropertiesDialog::loadOptions()
         const QString name = line.left(slash).trimmed();
         const QString text = line.mid(slash + 1, colon - slash - 1).trimmed();
         const QString rest = line.mid(colon + 1).trimmed();
-        const QStringList tokens = rest.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        const QStringList tokens = rest.split(QRegularExpression("\\s+"), kSkipEmptyParts);
         if (tokens.isEmpty())
             continue;
 
@@ -247,7 +248,7 @@ void PrintPropertiesDialog::loadGenericOptions()
     proc.waitForFinished(8000);
     const QString out = QString::fromLocal8Bit(proc.readAllStandardOutput());
     QMap<QString, QString> current;
-    for (const QString &tok : out.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts)) {
+    for (const QString &tok : out.split(QRegularExpression("\\s+"), kSkipEmptyParts)) {
         const int eq = tok.indexOf('=');
         if (eq > 0)
             current[tok.left(eq)] = tok.mid(eq + 1);
@@ -262,8 +263,8 @@ void PrintPropertiesDialog::loadGenericOptions()
             }
         if (exists) continue;
 
-        const QStringList rawList = QString(QLatin1String(g.rawDefaults)).split(' ', Qt::SkipEmptyParts);
-        const QStringList dispList = tr(g.dispDefaults).split(' ', Qt::SkipEmptyParts);
+        const QStringList rawList = QString(QLatin1String(g.rawDefaults)).split(' ', kSkipEmptyParts);
+        const QStringList dispList = tr(g.dispDefaults).split(' ', kSkipEmptyParts);
         if (rawList.isEmpty()) continue;
 
         const QString currentRaw = genericOptionRawDefault(QLatin1String(g.name),

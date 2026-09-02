@@ -7,10 +7,14 @@
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QFile>
+#include <QFileInfo>
+#include <QElapsedTimer>
+#include <QTemporaryFile>
 #include <QFutureWatcher>
 #include <QtConcurrent>
 
 #include <cups/cups.h>
+#include "qtcompat.h"
 
 PrintManager::PrintManager(QObject *parent)
     : QObject(parent)
@@ -125,14 +129,29 @@ QString PrintManager::prettyNameFromUri(const QString &uri)
     return s.isEmpty() ? uri : s;
 }
 
-QString PrintManager::makeDefaultName(const QString &uri)
+QString PrintManager::sanitizeQueueName(const QString &s)
 {
-    QString base = prettyNameFromUri(uri);
+    QString base = s;
+    // CUPS 队列名允许字母、数字、连字符、下划线、点。其他字符替换为空格，
+    // 再合并多空格，最后转为连字符，得到如 "Pantum-BM4240ADW-Series"。
     base.replace(QRegularExpression("[^\\w-]"), " ");
-    base = base.split(' ', Qt::SkipEmptyParts).join(" ");
+    base = base.split(' ', kSkipEmptyParts).join(" ");
     if (base.isEmpty())
         base = "printer";
     base.replace(' ', '-');
+    return base.left(127);
+}
+
+QString PrintManager::makeDefaultName(const QString &uri, const QString &realModel)
+{
+    // 优先用真实品牌型号派生队列名（更直观，与"已配置队列"列表主标题一致）。
+    // 缺失或清洗后为空时，回退到从 URI 派生。
+    QString base = sanitizeQueueName(realModel.isEmpty() ? prettyNameFromUri(uri) : realModel);
+    if (base == QStringLiteral("printer") && !realModel.isEmpty()) {
+        // 清洗后恰好等于默认名，说明 realModel 全是 URI 风格字符（如 URI 后半段），
+        // 此时 URI 派生更靠谱，回退。
+        base = sanitizeQueueName(prettyNameFromUri(uri));
+    }
 
     cups_dest_t *dests = nullptr;
     const int numDests = cupsGetDests(&dests);
@@ -147,13 +166,17 @@ QString PrintManager::makeDefaultName(const QString &uri)
     return candidate.left(127);
 }
 
-// 解析 driverless 输出，driverless 在 List 模式下输出形如：
-//   " ipp://192.168.1.10:631/ipp/print  Pantum BM4240ADW Series A3024A "
-// 但实际不同版本输出差异较大，所以我们优先依赖 make+model 反查
+// 解析 driverless 输出。需要兼容至少两种输出格式：
+//   新（>= cups-filters 1.28）：双引号包围的 5 字段：
+//     "driverless:ipp://host/ipp/print"  lang  "Pantum"  "Pantum BM4240ADW Series, driverless, cups-filters 1.21.6"  "MFG:...;MDL:..."
+//   旧：空格分隔单 URI + 描述：
+//     ipp://host/ipp/print  Pantum BM4240ADW Series
+// 本函数只负责匹配 URI，并尽量从描述里剥离出干净的型号名。
 static QString reverseLookupMakeModel(const QString &uri, const QString &dlList)
 {
     // 使用预取的 `driverless list` 输出，避免每台设备重复起进程（8 秒超时会叠加）
-    const QString &out = dlList;
+    if (dlList.isEmpty())
+        return {};
 
     auto strip = [](QString s) {
         if (s.startsWith("ipps://")) s = s.mid(7);
@@ -163,27 +186,102 @@ static QString reverseLookupMakeModel(const QString &uri, const QString &dlList)
     };
     const QString target = strip(uri);
 
-    for (const QString &line : out.split('\n', Qt::SkipEmptyParts)) {
-        const QString trimmed = line.trimmed();
-        // 简单启发：每行第一个 URI 后面的字符串作为描述
-        QString cand;
-        QString rest;
-        if (trimmed.startsWith("ipp://") || trimmed.startsWith("ipps://")
-            || trimmed.startsWith("dnssd://")) {
-            const int sp = trimmed.indexOf(' ');
-            if (sp > 0) {
-                cand = trimmed.left(sp);
-                rest = trimmed.mid(sp + 1).trimmed();
-            } else {
-                cand = trimmed;
-            }
-        } else {
+    // 先按新格式匹配。实际样本（cups-filters 1.21.6）：
+//   "driverless:ipp://localhost:60000/ipp/print" en "Pantum" "Pantum BM4240ADW Series, driverless, cups-filters 1.21.6" "MFG:Pantum;MDL:..."
+// 注意：lang 字段（"en"）是**裸文本不带引号**。其他 4 段是带引号。
+// 字段顺序：URI · lang · make · description · attributes。URI 可能有 "driverless:" 前缀。
+// 注意：QStringLiteral 不能与 R"(...)" 嵌套（宏内的引号会被 raw string 提前闭合），
+// 因此这里用普通字符串字面量 + 双反斜杠表达正则反斜杠。
+    static const QRegularExpression kQuoted(
+        QStringLiteral("\"([^\"]+)\"[ \\t]+(?:\"([^\"]*)\"|(\\S+))[ \\t]+\"([^\"]*)\"[ \\t]+\"([^\"]*)\""));
+    // 旧格式作为兜底。
+    static const QRegularExpression kPlain(
+        QStringLiteral("^(?:driverless:)?([a-z]+://\\S+)\\s+(.+)$"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    for (const QString &raw : dlList.split('\n', kSkipEmptyParts)) {
+        const QString line = raw.trimmed();
+        if (line.startsWith(QStringLiteral("DEBUG")))
             continue;
+
+        QString cand, model;
+        auto m = kQuoted.match(line);
+        if (m.hasMatch()) {
+            // 新格式（5 字段：URI · lang · make · description · attributes）
+            // 捕获组 1=URI  2=lang(quoted) 3=lang(unquoted) 4=make 5=description
+            QString u = m.captured(1);
+            if (u.startsWith(QStringLiteral("driverless:")))
+                u = u.mid(10);
+            cand = u;
+            QString desc = m.captured(5);
+            // 描述形如 "Pantum BM4240ADW Series, driverless, cups-filters 1.21.6"
+            // 去掉 ", driverless, cups-filters ..." 后缀
+            const int idx = desc.indexOf(QStringLiteral(", driverless,"));
+            if (idx >= 0)
+                desc = desc.left(idx).trimmed();
+            model = desc;
+        } else {
+            // 旧格式
+            m = kPlain.match(line);
+            if (!m.hasMatch())
+                continue;
+            cand = m.captured(1);
+            QString desc = m.captured(2).trimmed();
+            const int idx = desc.indexOf(QStringLiteral(", driverless,"));
+            if (idx >= 0)
+                desc = desc.left(idx).trimmed();
+            model = desc;
         }
+
         if (strip(cand) == target)
-            return rest;
+            return model;
     }
     return {};
+}
+
+// 兜底：通过 IPP 协议直接问设备本身的 printer-make-and-model 属性。
+// 这是最权威的来源，但每台设备都需要起一个 ipptool 进程（~200ms）。
+// 只在 driverless 反查失败时调用，避免给已经走得通的设备增加延迟。
+//
+// 注意：ipptool 必须从文件读测试定义（不支持 stdin），且默认输出格式是测试报告
+// （"    xxx (xxx) = value"）。这里走 -tv 模式产生单行 key=value。
+static QString fetchMakeModelViaIpp(const QString &uri)
+{
+    static const QRegularExpression kModelLine(
+        QStringLiteral("printer-make-and-model\\s+\\(textWithoutLanguage\\)\\s*=\\s*(.+)$"),
+        QRegularExpression::MultilineOption);
+
+    // 写测试定义到临时文件
+    QTemporaryFile tmp(QStringLiteral("/tmp/ippusb-assistant-XXXXXX.printer"));
+    tmp.setAutoRemove(true);
+    if (!tmp.open())
+        return {};
+    tmp.write(QStringLiteral(
+        "{\n"
+        "  OPERATION Get-Printer-Attributes\n"
+        "  GROUP operation-attributes-tag\n"
+        "  ATTR charset attributes-charset utf-8\n"
+        "  ATTR naturalLanguage attributes-natural-language en\n"
+        "  ATTR uri printer-uri $uri\n"
+        "  ATTR keyword requested-attributes printer-make-and-model\n"
+        "}\n").toUtf8());
+    tmp.close();
+
+    QProcess p;
+    // -tv 给出测试报告，printer-make-and-model 会作为单行 key=value 出现
+    p.start(QStringLiteral("ipptool"),
+            {QStringLiteral("-tv"), uri, tmp.fileName()});
+    if (!p.waitForFinished(6000))
+        return {};
+    const QString out = QString::fromLocal8Bit(p.readAllStandardOutput());
+    auto m = kModelLine.match(out);
+    if (!m.hasMatch())
+        return {};
+    QString name = m.captured(1).trimmed();
+    // 防御：噪声行匹配
+    if (name.isEmpty() || name.contains(QLatin1Char(' ')) == false)
+        return {};
+    return name;
 }
 
 // 取一次 `driverless list` 输出并缓存（反查型号 + 免驱判定共用），
@@ -198,6 +296,8 @@ static QString fetchDriverlessList()
 }
 
 // 通过 `driverless list` 成员关系判定免驱能力（无额外进程开销）。
+// 同 reverseLookupMakeModel：必须兼容 driverless list 的带引号新格式
+// （"driverless:ipp://..."），否则整个列表都会被跳过、everyone 全 false。
 static bool inDriverlessList(const QString &uri, const QString &dlList)
 {
     if (dlList.isEmpty())
@@ -209,13 +309,29 @@ static bool inDriverlessList(const QString &uri, const QString &dlList)
         return s.section('?', 0, 0).section('#', 0, 0).toLower();
     };
     const QString target = strip(uri);
-    for (const QString &line : dlList.split('\n', Qt::SkipEmptyParts)) {
-        const QString trimmed = line.trimmed();
-        if (!(trimmed.startsWith("ipp://") || trimmed.startsWith("ipps://")
-              || trimmed.startsWith("dnssd://")))
+
+    // 既要兼容新格式（"driverless:ipp://..."），也要兼容旧格式（ipp://...<空格>...）
+    // 不同 cups-filters 版本在 URI 后可能多一个 lang 字段（"en"），因此后续字段都放宽。
+    static const QRegularExpression kQuoted(
+        QStringLiteral("\"driverless:([^\"]+)\"\\s+(?:\"[^\"]*\"\\s+)?\""));
+    static const QRegularExpression kPlain(
+        QStringLiteral("^(?:driverless:)?([a-z]+://\\S+)"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    for (const QString &raw : dlList.split('\n', kSkipEmptyParts)) {
+        const QString line = raw.trimmed();
+        if (line.startsWith(QStringLiteral("DEBUG")))
             continue;
-        const int sp = trimmed.indexOf(' ');
-        const QString cand = sp > 0 ? trimmed.left(sp) : trimmed;
+        QString cand;
+        auto m = kQuoted.match(line);
+        if (m.hasMatch()) {
+            cand = m.captured(1);
+        } else {
+            m = kPlain.match(line);
+            if (!m.hasMatch())
+                continue;
+            cand = m.captured(1);
+        }
         if (strip(cand) == target)
             return true;
     }
@@ -226,7 +342,10 @@ void PrintManager::enrichFromDriverless(QList<PrinterEntry> &list, const QString
 {
     for (PrinterEntry &e : list) {
         if (!e.makeAndModel.isEmpty()) continue;
+        // 先用 driverless 反查；只有 ipptool 适用的 IPP 设备才能继续兜底。
         QString m = reverseLookupMakeModel(e.uri, dlList);
+        if (m.isEmpty() && PrinterEntry::isIppUri(e.uri))
+            m = fetchMakeModelViaIpp(e.uri);
         if (!m.isEmpty())
             e.makeAndModel = m;
         if (e.makeAndModel.isEmpty())
@@ -323,7 +442,7 @@ void PrintManager::discover()
             drv.start("driverless", QStringList());
             if (drv.waitForFinished(15000)) {
                 const QString out = QString::fromLocal8Bit(drv.readAllStandardOutput());
-                for (const QString line : out.split('\n', Qt::SkipEmptyParts)) {
+                for (const QString line : out.split('\n', kSkipEmptyParts)) {
                     const QString s = line.trimmed();
                     if (!s.startsWith("ipp://") && !s.startsWith("ipps://")
                         && !s.startsWith("dnssd://"))
@@ -338,7 +457,9 @@ void PrintManager::discover()
                     uri = normalizeUriForLpadmin(uri);
                     PrinterEntry e;
                     e.uri = uri;
-                    e.name = makeDefaultName(uri);
+                    // 优先用 driverless 给出的真实型号生成队列名（如
+                    // "Pantum-BM4240ADW-Series"），"已配置队列"列表主标题就能直接显示品牌。
+                    e.name = makeDefaultName(uri, desc);
                     e.makeAndModel = desc;
                     e.protocols = QStringList{ PrinterEntry::detectProtocol(uri) };
                     e.everywhere = true;
@@ -367,7 +488,7 @@ void PrintManager::discover()
         lpinfoV.start("lpinfo", {"-v"});
         if (lpinfoV.waitForFinished(10000)) {
             const QString out = QString::fromLocal8Bit(lpinfoV.readAllStandardOutput());
-            for (const QString line : out.split('\n', Qt::SkipEmptyParts)) {
+            for (const QString line : out.split('\n', kSkipEmptyParts)) {
                 QString s = line.trimmed();
                 // 形如 "network socket://192.168.1.10:9100" 或 "direct usb://..."
                 const int sp = s.indexOf(' ');
@@ -447,6 +568,41 @@ QList<PrinterEntry> PrintManager::readCupsQueues()
         queues.append(e);
     }
     cupsFreeDests(numDests, dests);
+
+    // 一次性跑 lpstat -l -p 把每台队列的 printer-info（Description）拿到，
+    // 覆盖 PPD 默认的 "Printer - IPP Everywhere"——这样"已配置队列"的副标题
+    // 与 driverless 待添加项就能显示同一个品牌型号。
+    //
+    // 中文 lpstat -l 段落形如：
+    //   打印机 Pantum-BM4240ADW-Series ... 描述: Pantum BM4240ADW Series ...
+    // 这里以队列名为锚点切分段落，再在该段落里匹配 "描述：".
+    QProcess lpstat;
+    lpstat.start("lpstat", {"-l", "-p"});
+    if (lpstat.waitForFinished(8000)) {
+        const QString out = QString::fromLocal8Bit(lpstat.readAllStandardOutput());
+        static const QRegularExpression rxDes(
+            QStringLiteral("描述[\\s:]+\"([^\"]+)\""),
+            QRegularExpression::CaseInsensitiveOption);
+        for (PrinterEntry &e : queues) {
+            const int block = out.indexOf(e.name);
+            if (block < 0)
+                continue;
+            const int from = block + e.name.length();
+            // 段落边界：下一个队列的 "打印机 " 起始；找不到则取全文末尾
+            const int next = out.indexOf(QStringLiteral("打印机 "), from);
+            const int end = next < 0 ? out.length() : next;
+            const auto m = rxDes.match(out.mid(from, end - from));
+            if (m.hasMatch()) {
+                const QString d = m.captured(1).trimmed();
+                if (!d.isEmpty() && d != e.name) {
+                    e.ppdMakeModel = d;
+                    if (e.makeAndModel.isEmpty())
+                        e.makeAndModel = d;
+                }
+            }
+        }
+    }
+
     return queues;
 }
 
@@ -533,8 +689,39 @@ QString PrintManager::ppdDriverPath(const QString &queue)
     return queuePpdPath(queue);
 }
 
+// 等待 CUPS 为队列生成好 PPD 文件。
+//
+// 关键陷阱：lpadmin 创建队列之后，PPD 是由 cupsd 异步生成的。在 PPD 落盘之前
+// 调用 "lpadmin -p NAME -o PageSize=A4" 会返回退出码 0（看起来成功），但随后
+// 生成的 PPD 会用它自己的默认值把这次设置覆盖掉——默认纸张退回 Letter。
+// 系统自带的打印管理器读的正是 PPD 里的 *DefaultPageSize，于是那边仍显示 Letter，
+// 而本应用若从别处读值，两边就此永久分叉。
+//
+// 探测方式用 "lpoptions -p <queue> -l"：PPD 未就绪时 CUPS 会返回
+// "无法为 <queue> 获取 PPD 文件"，就绪后才会列出各选项（含 PageSize）。
+// 这样既不依赖已废弃的 cupsGetPPD()（CUPS 1.6 起标记 deprecated），
+// 也不需要硬编码具体的 ppd 目录配置。
+static bool waitForPpdReady(const QString &name, int timeoutMs = 8000)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < timeoutMs) {
+        QProcess proc;
+        proc.start(QStringLiteral("lpoptions"),
+                   {QStringLiteral("-p"), name, QStringLiteral("-l")});
+        if (proc.waitForFinished(3000)) {
+            const QString out = QString::fromLocal8Bit(proc.readAllStandardOutput());
+            if (out.contains(QStringLiteral("PageSize")))
+                return true;
+        }
+        QThread::msleep(150);
+    }
+    return false;
+}
+
 bool PrintManager::addPrinter(const QString &name, const QString &uri,
-                              const QString &driver, QString &errMsg)
+                              const QString &driver, const QString &prettyName,
+                              QString &errMsg)
 {
     if (name.isEmpty() || uri.isEmpty()) {
         errMsg = tr("队列名与 driverless URI 均不能为空");
@@ -637,21 +824,51 @@ bool PrintManager::addPrinter(const QString &name, const QString &uri,
     }
 
     // 免驱 PPD 默认纸张多为 Letter（美制），国内默认应为 A4。
-    // 通过 lpadmin -o 设置队列默认 PageSize（用户在 lpadmin 组即可，无需改 PPD 文件）；
+    //
+    // 必须先等 PPD 落盘再设置：lpadmin 建队列后 PPD 是异步生成的，在此之前调用
+    // lpadmin -o 会返回 0 却静默失效（PPD 随后被默认内容覆盖，纸张退回 Letter）。
+    //
+    // 绝不要改用 "lpoptions -p NAME -o PageSize=A4"：那写的是用户级
+    // ~/.cups/lpoptions，会形成一层覆盖把 PPD 的真实值遮蔽掉——本应用读到 A4，
+    // 而系统打印管理器读 PPD 原值，两边就此永久不同步（用户改 A5 应用也看不到）。
+    // 统一以 PPD 为唯一真相源，两个程序才会一致。
+    //
+    // lpadmin -o 由 cupsd 代写 PPD，在 lpadmin 组即可，不需要额外提权。
     // PPD 不支持 A4 时该命令失败，静默忽略保持原默认。
+    waitForPpdReady(name);
+
+    // 顺带清理历史遗留的用户级 PageSize 覆盖：早期版本曾误用 lpoptions 写入
+    // ~/.cups/lpoptions，那层覆盖会遮蔽 PPD 的真实值，导致在系统打印管理器里
+    // 改过的纸张在本应用中读不到。传空值可单独解除该项，其余选项不受影响。
+    run({"lpoptions", "-p", name, "-o", "PageSize="}, out, err);
+
     run({"lpadmin", "-p", name, "-o", "PageSize=A4"}, out, err);
 
     // 启用队列并接受任务
     run({"cupsaccept", name}, out, err);
     run({"cupsenable", name}, out, err);
 
+    // 设置 CUPS 队列的 description（printer-info）。在 lpstat -l -p 的输出里，
+    // 这就是 "描述：" 字段；而 "打印属性 → 基础信息 → 描述" 也是从这里读的。
+    // PPD 里只有 "Printer - IPP Everywhere"，缺乏品牌型号——只有显式设置 printer-info
+    // 才能让用户看到 "Pantum BM4240ADW Series" 等真实型号。
+    // 空字符串或与 PPD 自身重复时跳过，避免覆盖已经合理的值。
+    if (!prettyName.isEmpty() && prettyName != QLatin1String("Printer - IPP Everywhere")) {
+        run({"lpadmin", "-p", name, "-D", prettyName}, out, err);
+    }
+
     // 回读 PPD 真实 make/model，写入队列信息（PPD 关联）
     m_lastAddedMakeModel = ppdManufacturer(name);
+    // 优先以 caller 给出的 prettyName 为准——这是从 driverless 拿到的最准确型号，
+    // PPD 里只有通用模板字符串。回读失败时仍能给 UI 提供有效文案。
+    if (m_lastAddedMakeModel.isEmpty() && !prettyName.isEmpty())
+        m_lastAddedMakeModel = prettyName;
     return true;
 }
 
 void PrintManager::addPrinterAsync(const QString &name, const QString &uri,
-                                   const QString &driver)
+                                   const QString &driver,
+                                   const QString &prettyName)
 {
     if (m_addPrinterRunning)
         return;
@@ -666,13 +883,13 @@ void PrintManager::addPrinterAsync(const QString &name, const QString &uri,
         watcher->deleteLater();
         emit addPrinterFinished(result);
     });
-    watcher->setFuture(QtConcurrent::run([name, uri, driver]() {
+    watcher->setFuture(QtConcurrent::run([name, uri, driver, prettyName]() {
         // 临时管理器完全生活在工作线程中，后台任务不捕获界面对象。
         PrintManager worker;
         PrinterAddResult result;
         result.name = name;
         result.uri = uri;
-        result.ok = worker.addPrinter(name, uri, driver, result.error);
+        result.ok = worker.addPrinter(name, uri, driver, prettyName, result.error);
         result.makeModel = worker.lastAddedMakeModel();
         return result;
     }));
@@ -685,14 +902,18 @@ QString PrintManager::lastAddedMakeModel() const
 
 bool PrintManager::removePrinter(const QString &name, QString &errMsg)
 {
-    QProcess proc;
-    proc.start("lpadmin", {"-x", name});
-    const bool ok = proc.waitForFinished(15000)
-                    && proc.exitStatus() == QProcess::NormalExit
-                    && proc.exitCode() == 0;
-    if (!ok) {
-        errMsg = QString::fromLocal8Bit(proc.readAllStandardError());
-        if (errMsg.isEmpty()) errMsg = tr("删除失败（请确认当前用户在 lpadmin 组）");
+    // 删除队列是 CUPS 队列管理的写操作，必须经 Privileges 统一判定：
+    // lpadmin 组直跑，否则自动 pkexec。此前这里裸调 lpadmin 且不提权，
+    // 非 lpadmin 用户点"删除打印机"必然失败，只能靠错误文案兜底。
+    QString err;
+    const int code = Privileges::run(QStringLiteral("lpadmin"),
+                                     {QStringLiteral("-x"), name},
+                                     Privileges::Elevation::Auto,
+                                     nullptr, &err, 15000);
+    if (code != 0) {
+        errMsg = err.trimmed();
+        if (errMsg.isEmpty())
+            errMsg = tr("删除失败（请确认当前用户在 lpadmin 组，或授权后重试）");
         return false;
     }
     return true;
@@ -700,13 +921,22 @@ bool PrintManager::removePrinter(const QString &name, QString &errMsg)
 
 bool PrintManager::setDefault(const QString &name, QString &errMsg)
 {
-    QProcess proc;
-    proc.start("lpoptions", {"-d", name});
-    const bool ok = proc.waitForFinished(8000)
-                    && proc.exitStatus() == QProcess::NormalExit
-                    && proc.exitCode() == 0;
-    if (!ok) {
-        errMsg = QString::fromLocal8Bit(proc.readAllStandardError());
+    // 这里刻意用 Never 而不是 Auto，原因有三：
+    //   1) lpoptions -d 写的是当前用户的 ~/.cups/lpoptions，任何用户都能写，
+    //      根本不需要 root，提权没有收益；
+    //   2) 一旦走 pkexec，CUPS 会改写成系统级 /etc/cups/lpoptions，
+    //      语义从"改我自己的默认打印机"变成"改全系统默认打印机"；
+    //   3) 用 Auto 会让行为随调用者是否在 lpadmin 组而漂移——组内改用户级、
+    //      组外改系统级，同一个按钮两种结果。
+    // 注意 privileges.h 把 lpoptions 列在 Never 类，指的是 -p/-l 只读探测；
+    // 本函数是 -d 写操作，虽同样不需要 root，但不属于只读。
+    QString err;
+    const int code = Privileges::run(QStringLiteral("lpoptions"),
+                                     {QStringLiteral("-d"), name},
+                                     Privileges::Elevation::Never,
+                                     nullptr, &err, 8000);
+    if (code != 0) {
+        errMsg = err.trimmed();
         if (errMsg.isEmpty()) errMsg = tr("设为默认失败");
         return false;
     }
@@ -715,15 +945,19 @@ bool PrintManager::setDefault(const QString &name, QString &errMsg)
 
 bool PrintManager::setAccepting(const QString &name, bool accept, QString &errMsg)
 {
-    QProcess proc;
-    proc.start(accept ? "cupsaccept" : "cupsreject", {name});
-    const bool ok = proc.waitForFinished(8000)
-                    && proc.exitStatus() == QProcess::NormalExit
-                    && proc.exitCode() == 0;
-    if (!ok) {
-        errMsg = QString::fromLocal8Bit(proc.readAllStandardError());
+    // cupsaccept / cupsreject 修改系统队列的接单状态，是写操作，
+    // 与 removePrinter 同样走 Auto（privileges.h 已把 cupsaccept 归为队列管理）。
+    QString err;
+    const int code = Privileges::run(accept ? QStringLiteral("cupsaccept")
+                                            : QStringLiteral("cupsreject"),
+                                     {name},
+                                     Privileges::Elevation::Auto,
+                                     nullptr, &err, 8000);
+    if (code != 0) {
+        errMsg = err.trimmed();
         if (errMsg.isEmpty())
-            errMsg = accept ? tr("启用接受任务失败") : tr("暂停接受任务失败");
+            errMsg = accept ? tr("启用接受任务失败（请确认当前用户在 lpadmin 组）")
+                            : tr("暂停接受任务失败（请确认当前用户在 lpadmin 组）");
         return false;
     }
     return true;

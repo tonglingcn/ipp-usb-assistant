@@ -5,6 +5,7 @@
 #include <QLabel>
 #include <QProcess>
 #include <DMessageBox>
+#include "qtcompat.h"
 
 PrinterConfigDialog::PrinterConfigDialog(const QString &queue, QWidget *parent)
     : DDialog(parent), m_queue(queue)
@@ -45,26 +46,16 @@ PrinterConfigDialog::PrinterConfigDialog(const QString &queue, QWidget *parent)
         m_pageSize->setCurrentText(m_current.pageSize);
     else if (!m_current.pageSize.isEmpty())
         m_pageSize->insertItem(0, m_current.pageSize);
-    // 优先用队列实际生效的默认纸张（lpadmin -o PageSize=A4 设置的值，
-    // PPD 文件里的 *DefaultPageSize 不会同步更新）
-    QProcess lpopt;
-    lpopt.start("lpoptions", {"-p", queue, "-l"});
-    if (lpopt.waitForFinished(5000)) {
-        const QString out = QString::fromLocal8Bit(lpopt.readAllStandardOutput());
-        for (const QString &line : out.split('\n', Qt::SkipEmptyParts)) {
-            if (!line.startsWith("PageSize/", Qt::CaseInsensitive))
-                continue;
-            for (const QString &tok : line.section(':', 1).split(' ', Qt::SkipEmptyParts)) {
-                if (tok.startsWith('*')) {
-                    const QString def = tok.mid(1);
-                    if (m_pageSize->findText(def) >= 0)
-                        m_pageSize->setCurrentText(def);
-                    break;
-                }
-            }
-            break;
-        }
-    }
+
+    // 默认纸张直接采用 PpdConfig::read() 从 PPD 读到的 *DefaultPageSize。
+    //
+    // 这里曾经再用 "lpoptions -p <queue> -l" 覆盖一次，并注释称"PPD 里的
+    // *DefaultPageSize 不会同步更新"——那是错的：lpadmin -o 确实会更新 PPD。
+    // 当初看起来"不同步"，是因为 lpadmin -o 在 PPD 异步生成完成前调用，
+    // 返回 0 却静默失效（详见 printmanager.cpp 里的 waitForPpdReady）。
+    //
+    // 更重要的是，lpoptions 系列命令会优先反映用户级 ~/.cups/lpoptions 覆盖层，
+    // 一旦存在覆盖它就看不到 PPD 的真实值。坚持读 PPD 才能与系统打印管理器一致。
     psRow->addWidget(psLabel);
     psRow->addWidget(m_pageSize, 1);
     layout->addLayout(psRow);

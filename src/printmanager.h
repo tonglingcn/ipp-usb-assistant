@@ -74,15 +74,19 @@ public:
 
     /// 通过 driverless URI 添加打印机队列（pkexec lpadmin）
     /// driver 可为空；为空时按 everywhere / driverless:uri 顺序兜底
+    /// prettyName 真实品牌型号；用于设置 lpadmin -D（CUPS printer-info），
+    /// 让"打印属性 → 基础信息 → 描述"以及 lpstat -l -p 显示真实型号，
+    /// 而不是 PPD 默认的 "Printer - IPP Everywhere"。
     bool addPrinter(const QString &name, const QString &uri,
-                    const QString &driver, QString &errMsg);
+                    const QString &driver, const QString &prettyName, QString &errMsg);
     bool addPrinter(const QString &name, const QString &uri, QString &errMsg) {
-        return addPrinter(name, uri, QString(), errMsg);
+        return addPrinter(name, uri, QString(), QString(), errMsg);
     }
 
     /// 后台添加打印机，避免 lpadmin 重试期间阻塞界面。
     void addPrinterAsync(const QString &name, const QString &uri,
-                         const QString &driver = QString());
+                         const QString &driver = QString(),
+                         const QString &prettyName = QString());
     bool addPrinterInProgress() const { return m_addPrinterRunning; }
 
     /// 删除打印机队列（pkexec lpadmin -x）
@@ -103,7 +107,17 @@ public:
     static QString prettyNameFromUri(const QString &uri);
 
     /// 根据 URI 生成不重复的 CUPS 队列名
-    static QString makeDefaultName(const QString &uri);
+    ///
+    /// 当能拿到真实品牌型号（如 driverless 反查得到的 "Pantum BM4240ADW Series"）时，
+    /// 应优先用 realModel 派生队列名（如 "Pantum-BM4240ADW-Series"），这会让"已配置
+    /// 队列"列表的主标题直接显示品牌，比 URI 派生的 "localhost-60000" 直观得多。
+    /// 仍然走去重逻辑，重名追加 -2/-3。
+    static QString makeDefaultName(const QString &uri, const QString &realModel = QString());
+
+    /// 序列化为可作 CUPS 队列名的安全 ASCII：字母数字加连字符/下划线，
+    /// 截断到 127 字符；连续空白合并为单空格再转连字符。
+    /// 仅在 makeDefaultName 内部使用，也供 addPrinter 给 lpadmin 验名前清洗。
+    static QString sanitizeQueueName(const QString &s);
 
     /// 最近一次添加成功后，回读的 PPD 厂商型号（用于成功提示更精确）
     QString lastAddedMakeModel() const;

@@ -7,7 +7,7 @@
 #   - 使用仓库自带的 GITHUB_TOKEN, 默认具备 contents: write, 无需跨仓库 PAT
 #
 # 触发:
-#   - 推送 v1.0.0 等 tag
+#   - 推送 v1.0.1 等 tag
 #   - 手动 workflow_dispatch
 
 name: build-deb

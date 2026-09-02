@@ -6,6 +6,7 @@
 #include <QRegularExpression>
 #include <QProcess>
 #include <QTemporaryDir>
+#include "qtcompat.h"
 
 PpdConfig::PpdConfig(QObject *parent)
     : QObject(parent)
@@ -26,7 +27,7 @@ QStringList PpdConfig::supportedPageSizes(const QString &ppdPath)
 
     bool inPageSize = false;
     QTextStream ts(&f);
-    ts.setEncoding(QStringConverter::Utf8);
+    setUtf8Encoding(ts);
     QString line;
     while (ts.readLineInto(&line)) {
         if (line.startsWith("*OpenUI *PageSize"))
@@ -52,7 +53,7 @@ bool PpdConfig::read(const QString &queue, Options &out)
         return false;
 
     QTextStream ts(&f);
-    ts.setEncoding(QStringConverter::Utf8);
+    setUtf8Encoding(ts);
     QString line;
     bool inPageSize = false;
     while (ts.readLineInto(&line)) {
@@ -91,7 +92,7 @@ bool PpdConfig::apply(const QString &queue, const Options &opt, QString &errMsg)
 
     QStringList lines;
     QTextStream in(&f);
-    in.setEncoding(QStringConverter::Utf8);
+    setUtf8Encoding(in);
     QString line;
     bool hasBackSide = false;
     while (in.readLineInto(&line)) {
@@ -125,7 +126,7 @@ bool PpdConfig::apply(const QString &queue, const Options &opt, QString &errMsg)
             return false;
         }
         QTextStream ts(&tf);
-        ts.setEncoding(QStringConverter::Utf8);
+        setUtf8Encoding(ts);
         ts << lines.join('\n');
         tf.close();
 
@@ -142,7 +143,7 @@ bool PpdConfig::apply(const QString &queue, const Options &opt, QString &errMsg)
         }
     } else {
         QTextStream ts(&out);
-        ts.setEncoding(QStringConverter::Utf8);
+        setUtf8Encoding(ts);
         ts << lines.join('\n');
         out.close();
     }

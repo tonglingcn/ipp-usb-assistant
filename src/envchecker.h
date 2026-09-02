@@ -77,6 +77,13 @@ public:
     /// 三个关键依赖服务：ipp-usb / avahi-daemon / cups
     QList<ServiceInfo> services() const { return m_services; }
 
+    /// 按 unit 短名（如 "ipp-usb"）查找已检测到的服务，未找到返回 nullptr。
+    ///
+    /// 推荐使用本函数取代 services().value(n)：后者依赖 metas 的排列顺序，
+    /// 增删服务或调整顺序时会静默取错且编译期无任何提示。
+    /// 返回的指针指向 m_services 内部，仅在下次 check() 完成前有效。
+    const ServiceInfo *findService(const QString &unit) const;
+
     /// 查询单个 unit 的 active 状态
     static QString unitStatus(const QString &unit);
 

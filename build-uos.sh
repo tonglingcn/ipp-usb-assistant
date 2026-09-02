@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# IPP-USB 免驱助手 构建脚本 (deepin 25 / UOS 25, DTK6 + Qt6)
+# IPP-USB 免驱助手 构建脚本 (UOS 20, DTK5 + Qt5)
 #
-# UOS 20 (DTK5 + Qt5) 请改用 ./build-uos.sh。
-# CMakeLists.txt 会自动探测 Qt6/DTK6，本脚本只需保证对应 -dev 包已安装。
+# 针对 UOS 20 Professional（Debian 10 系，Qt 5.11.3 + DTK5 5.6.x）适配：
+#   - 构建依赖检测改为 Qt5 / Dtk5 对应的 -dev 包；
+#   - 运行时依赖与 Deepin 25 版一致（ipp-usb / cups / sane-airscan / avahi 等）；
+#   - CMakeLists.txt 已内置 Qt5/DTK5 双兼容探测，无需额外参数即可直接编出 Qt5 版本；
+#   - 打包使用本目录下的 debian-uos/ 元数据（Build-Depends/Depends 均为 Qt5/DTK5）。
 #
 # 用法:
-#   ./build.sh            # 仅编译
-#   ./build.sh --deb      # 编译并打包 deb
-#   ./build.sh --clean    # 清理构建目录
+#   ./build-uos.sh            # 仅编译
+#   ./build-uos.sh --deb      # 编译并打包 deb
+#   ./build-uos.sh --clean    # 清理构建目录
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,8 +28,8 @@ esac
 
 echo "==> 检查构建依赖 ..."
 MISSING=""
-for pkg in cmake build-essential pkg-config qt6-base-dev \
-           libdtk6core-dev libdtk6gui-dev libdtk6widget-dev \
+for pkg in cmake build-essential pkg-config qtbase5-dev qttools5-dev \
+           libdtkcore-dev libdtkgui-dev libdtkwidget-dev \
            libcups2-dev libsane-dev; do
     if ! dpkg -s "$pkg" >/dev/null 2>&1; then
         MISSING="$MISSING $pkg"
@@ -72,16 +75,20 @@ echo "    可执行文件: $BUILD_DIR/$APP_NAME"
 # ---- deb 打包 ----
 if [ "${1:-}" = "--deb" ]; then
     echo ""
-    echo "==> 打包 deb ..."
+    echo "==> 打包 deb (UOS 20 / Qt5 / DTK5) ..."
 
     # debhelper 需要干净的源码树：构建产物、编辑器备份等不能进包。
-    # 这里复制一份到临时目录打包，避免污染工作区。
-    PKG_TMP="$(mktemp -d /tmp/ipp-usb-assistant-pkg-XXXXXX)"
+    # 这里复制一份到临时目录，并使用 debian-uos/ 作为打包元数据。
+    PKG_TMP="$(mktemp -d /tmp/ipp-usb-assistant-uos-pkg-XXXXXX)"
     trap 'rm -rf "$PKG_TMP"' EXIT
 
-    # 排除 debian-uos/：那是 UOS 20 的元数据，混入会让打包目录出现两套 debian/
-    tar -cf - --exclude=build --exclude='*.zip' --exclude=debian-uos . \
+    # 排除 debian/：那是 deepin 25 / UOS 25 的 Qt6 元数据，
+    # 这里要用 debian-uos/ 顶替，先不复制以免出现两套 debian/
+    tar -cf - --exclude=build --exclude='*.zip' --exclude=debian . \
         | (cd "$PKG_TMP" && tar -xf -)
+
+    # 用 UOS 版元数据作为 debian/（Qt5/DTK5 的 Build-Depends/Depends）
+    cp -r "$PROJECT_DIR/debian-uos" "$PKG_TMP/debian"
 
     # 清理上次打包可能残留的中间文件
     rm -f "$PKG_TMP"/debian/files "$PKG_TMP"/debian/*.substvars

@@ -41,6 +41,7 @@
 #include <DSuggestButton>
 #include <DIconTheme>
 #include <DApplication>
+#include "qtcompat.h"
 
 namespace {
 
@@ -75,6 +76,7 @@ QWidget *makePageHeader(QWidget *parent, const QString &title, const QString &su
     auto *s = new DLabel(subtitle);
     s->setObjectName("pageSubtitle");
     s->setWordWrap(true);
+    s->setTextFormat(Qt::PlainText);  // 显式声明，避免 DTK 样式对换行的歧义判断
     layout->addWidget(t);
     layout->addWidget(s);
     return header;
@@ -191,7 +193,8 @@ void MainWindow::buildSidebar(QVBoxLayout *sideLayout)
     }
     sideLayout->addLayout(navBox);
 
-    connect(m_navGroup, QOverload<int>::of(&QButtonGroup::idClicked),
+    // Qt 6 用 idClicked(int)，Qt 5.15 之前叫 buttonClicked(int)，由 qtcompat.h 统一
+    connect(m_navGroup, QOverload<int>::of(IPP_USB_BUTTON_GROUP_ID_SIGNAL),
             this, &MainWindow::switchPage);
 
     if (auto *first = m_navGroup->button(0))
@@ -247,8 +250,11 @@ void MainWindow::onQuickCheckFinished(const InstallInfo &info)
     m_btnQuickCheck->setText(tr("一键环境自检"));
 
     // 本地检测结论
-    const QString ippStatus = m_env->services().value(0).status;
-    const bool ippInstalled = m_env->services().value(0).installed;
+    // 按 unit 名查找，不依赖 services() 的数组顺序。此前用 value(0)，
+    // 一旦 EnvChecker 里调整服务顺序或增删服务，这里就会静默取到别的服务。
+    const ServiceInfo *ippSvc = m_env->findService(QStringLiteral("ipp-usb"));
+    const QString ippStatus = ippSvc ? ippSvc->status : QString();
+    const bool ippInstalled = ippSvc && ippSvc->installed;
     const bool ippActive = ippStatus == "active";
     const bool ippFailed = ippStatus == "failed";
     const QString preset = EnvChecker::ippUsbPreset();
@@ -344,8 +350,9 @@ void MainWindow::onInstallIppUsb()
     // 这个按钮在不同状态下承担不同动作：
     //   - 未安装 + 仓库可达：执行 apt-get install ipp-usb
     //   - 已安装但未运行：根据候选设备决定"立即启动"或"启动并启用自启"
-    const auto &svc0 = m_env->services().value(0);
-    const bool installed = svc0.installed;
+    // 与 onQuickCheckFinished() 一致：按 unit 名取，不用下标
+    const ServiceInfo *ippSvc = m_env->findService(QStringLiteral("ipp-usb"));
+    const bool installed = ippSvc && ippSvc->installed;
     const QString btnText = m_btnInstall->text();
 
     auto runAsync = [this](std::function<QString(QString&)> op, const QString &okTitle,
@@ -1047,7 +1054,8 @@ void MainWindow::setupScanPage()
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addWidget(makePageHeader(m_scanPage, tr("扫描管理"),
-        tr("SANE + sane-airscan (eSCL)，USB 扫描依赖 ipp-usb 与 avahi-daemon。更多扫描功能请使用靓仔扫描。")));
+        tr("免驱扫描基于 SANE + sane-airscan (eSCL)，USB 扫描依赖 ipp-usb 与 avahi-daemon。\n"
+           "若厂商已提供 SANE 驱动，本机也会一并列出并支持基础扫描。")));
 
     auto *body = new QWidget;
     auto *bodyLayout = new QVBoxLayout(body);
@@ -1309,11 +1317,12 @@ void MainWindow::onAddPrinter()
     const QString name = dlg.addedQueueName();
     const QString uri  = dlg.property("uri").toString();
     const QString driver = dlg.property("driver").toString();
+    const QString prettyName = dlg.property("prettyName").toString();
     if (name.isEmpty() || uri.isEmpty()) return;
 
     m_btnAddPrinter->setEnabled(false);
     m_btnAddPrinter->setText(tr("安装") + QStringLiteral("…"));
-    m_print->addPrinterAsync(name, uri, driver);
+    m_print->addPrinterAsync(name, uri, driver, prettyName);
 }
 
 void MainWindow::onAddPrinterFinished(const PrinterAddResult &result)
@@ -1522,14 +1531,28 @@ void MainWindow::onScanDiscovery(bool found)
             QString(), QColor(240, 65, 66), "S"));
         return;
     }
-    for (const auto &d : devs) {
+    for (int i = 0; i < devs.size(); ++i) {
         // 双保险：部分 SANE 后端返回的设备 URI 含 IPv6 字面量 [::1]，
         // scanimage 无法打开。即使 ScannerManager 已做替换，这里再处理一次，
         // 确保 UI 显示与 scanimage 实际可用形式一致（localhost）。
-        QString display = d;
+        QString display = devs.at(i);
         if (display.contains(QLatin1String("[::1]")))
             display.replace(QLatin1String("[::1]"), QLatin1String("localhost"));
-        m_scanModel->appendRow(makeItem(display, tr("SANE eSCL 扫描设备"), QColor(0, 166, 156), "S"));
+
+        // 按后端如实标注：免驱 eSCL 与厂商原生 SANE 驱动是两类东西，
+        // 混为一谈会让用户（和支持人员）误判设备的免驱能力。
+        const ScanBackend be = m_scan->backend(i);
+        QString sub;
+        QColor color(0, 166, 156);
+        if (be == ScanBackend::Escl) {
+            sub = tr("免驱 eSCL 扫描设备（IPP-USB）");
+        } else if (be == ScanBackend::Vendor) {
+            sub = tr("厂商自带 SANE 驱动（非免驱）");
+            color = QColor(0, 129, 200);
+        } else {
+            sub = tr("SANE 扫描设备");
+        }
+        m_scanModel->appendRow(makeItem(display, sub, color, "S"));
     }
     // 默认选中第一台设备，方便直接扫描
     if (m_scannerView && m_scanModel->rowCount() > 0)
